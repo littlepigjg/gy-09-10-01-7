@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS rate_limit_events (
     limit_rate FLOAT,
     reason VARCHAR(200),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_created (created_at)
+    INDEX idx_events_created (created_at)
 ) ENGINE=InnoDB;
 
 -- 流量统计表
@@ -61,6 +61,23 @@ CREATE TABLE IF NOT EXISTS traffic_stats (
     avg_latency_ms FLOAT DEFAULT 0,
     circuit_breaker_trips INT DEFAULT 0,
     INDEX idx_timestamp (timestamp)
+) ENGINE=InnoDB;
+
+-- 限流事件冷数据归档表（按 path + 整点小时桶聚合的压缩块）
+CREATE TABLE IF NOT EXISTS rate_limit_event_archives (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    path VARCHAR(255) NOT NULL,
+    hour_bucket DATETIME NOT NULL COMMENT '整点小时桶',
+    event_count INT NOT NULL DEFAULT 0 COMMENT '块内事件数',
+    allowed_count INT NOT NULL DEFAULT 0,
+    rejected_count INT NOT NULL DEFAULT 0,
+    raw_size_bytes BIGINT NOT NULL DEFAULT 0 COMMENT '原始行估算字节数',
+    block_size INT NOT NULL DEFAULT 0 COMMENT '压缩块字节数',
+    block_data LONGBLOB NOT NULL COMMENT 'zlib 压缩的聚合载荷(分钟级分布/原因/TopIP)',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_archive_path_hour (path, hour_bucket),
+    INDEX idx_archive_path_hour (path, hour_bucket)
 ) ENGINE=InnoDB;
 
 -- 插入默认限流规则

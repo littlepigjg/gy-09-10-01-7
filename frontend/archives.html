@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>事件冷热分层归档分析</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0f1117;--card:#1a1d27;--card-hover:#222633;--border:#2a2e3d;--text:#e4e6eb;--text-dim:#8b8fa3;--accent:#6366f1;--accent-light:#818cf8;--green:#10b981;--red:#ef4444;--orange:#f59e0b;--blue:#3b82f6;--purple:#8b5cf6;--cyan:#06b6d4}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+.header{background:linear-gradient(135deg,#1e1b4b 0%,#312e81 100%);padding:20px 32px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border)}
+.header h1{font-size:22px;font-weight:700;letter-spacing:.5px}
+.header h1 span{color:var(--accent-light);font-weight:800}
+.header-right{display:flex;align-items:center;gap:16px}
+.header-right a{font-size:13px;color:var(--accent-light);text-decoration:none;border:1px solid var(--accent);padding:5px 12px;border-radius:6px}
+.container{max-width:1440px;margin:0 auto;padding:24px}
+.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px}
+.stat-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;position:relative;overflow:hidden}
+.stat-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px}
+.stat-card:nth-child(1)::before{background:var(--blue)}
+.stat-card:nth-child(2)::before{background:var(--purple)}
+.stat-card:nth-child(3)::before{background:var(--green)}
+.stat-card:nth-child(4)::before{background:var(--orange)}
+.stat-label{font-size:13px;color:var(--text-dim);margin-bottom:8px;text-transform:uppercase;letter-spacing:1px}
+.stat-value{font-size:28px;font-weight:700}
+.stat-card:nth-child(1) .stat-value{color:var(--blue)}
+.stat-card:nth-child(2) .stat-value{color:var(--purple)}
+.stat-card:nth-child(3) .stat-value{color:var(--green)}
+.stat-card:nth-child(4) .stat-value{color:var(--orange)}
+.stat-sub{font-size:12px;color:var(--text-dim);margin-top:4px}
+.panel{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:24px}
+.panel-header{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.panel-header h3{font-size:15px;font-weight:600}
+.panel-body{padding:20px}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;padding:10px 12px;font-size:12px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border);font-weight:600;white-space:nowrap}
+td{padding:10px 12px;font-size:13px;border-bottom:1px solid rgba(42,46,61,.5)}
+tr:hover{background:var(--card-hover)}
+code{font-family:ui-monospace,Menlo,monospace}
+.badge{padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600}
+.badge-cyan{background:rgba(6,182,212,.15);color:var(--cyan)}
+.badge-purple{background:rgba(139,92,246,.15);color:var(--purple)}
+.btn{padding:6px 14px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);font-size:12px;cursor:pointer;transition:all .2s;font-weight:500}
+.btn:hover{background:var(--card-hover);border-color:var(--accent)}
+.btn-primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn-primary:hover{background:var(--accent-light)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.empty{text-align:center;padding:40px;color:var(--text-dim);font-size:14px}
+.ratio-bar{width:90px;height:6px;background:var(--bg);border-radius:3px;display:inline-block;vertical-align:middle;margin-left:8px;overflow:hidden}
+.ratio-bar i{display:block;height:100%;background:linear-gradient(90deg,var(--purple),var(--cyan))}
+.meta-line{font-size:12px;color:var(--text-dim);line-height:1.8}
+.chart-container{height:320px;position:relative}
+/* 模态框 */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;align-items:center;justify-content:center}
+.modal-overlay.active{display:flex}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:16px;width:860px;max-width:94vw;max-height:88vh;overflow-y:auto}
+.modal-header{padding:20px 24px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+.modal-header h3{font-size:16px}
+.modal-close{background:none;border:none;color:var(--text-dim);font-size:20px;cursor:pointer;padding:4px}
+.modal-body{padding:24px}
+.form-row{display:grid;grid-template-columns:1fr 1fr 160px auto;gap:10px;margin-bottom:16px;align-items:end}
+.form-group label{display:block;font-size:12px;color:var(--text-dim);margin-bottom:6px;font-weight:500}
+.form-group input,.form-group select{width:100%;padding:9px 11px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;outline:none}
+.form-group input:focus,.form-group select:focus{border-color:var(--accent)}
+.drill-meta{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
+.drill-meta div{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px}
+.drill-meta .k{font-size:11px;color:var(--text-dim)}
+.drill-meta .v{font-size:18px;font-weight:700;margin-top:2px}
+.drill-side{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}
+.drill-side h4{font-size:13px;color:var(--text-dim);margin-bottom:8px;font-weight:600}
+.drill-side .item{display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px solid rgba(42,46,61,.4)}
+::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+@media(max-width:1024px){.stats-grid{grid-template-columns:repeat(2,1fr)}.form-row{grid-template-columns:1fr 1fr}.drill-meta{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1><span>API</span> 事件冷热分层归档分析</h1>
+  <div class="header-right">
+    <a href="/">← 返回控制台</a>
+  </div>
+</div>
+
+<div class="container">
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">热表事件(估)</div>
+      <div class="stat-value" id="stat-hot">-</div>
+      <div class="stat-sub" id="stat-retention">-</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">已归档事件</div>
+      <div class="stat-value" id="stat-archived">-</div>
+      <div class="stat-sub" id="stat-blocks">-</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">整体压缩比</div>
+      <div class="stat-value" id="stat-ratio">-</div>
+      <div class="stat-sub" id="stat-size">-</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">归档水位线</div>
+      <div class="stat-value" style="font-size:18px;padding-top:8px" id="stat-cutoff">-</div>
+      <div class="stat-sub" id="stat-range">-</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-header">
+      <h3>各路径压缩块与可下钻区间</h3>
+      <div style="display:flex;gap:10px;align-items:center">
+        <span class="meta-line" id="last-run">尚未执行归档</span>
+        <button class="btn btn-primary" id="btn-run" onclick="runArchive()">立即归档一轮</button>
+        <button class="btn" onclick="load()">刷新</button>
+      </div>
+    </div>
+    <div class="panel-body" style="padding:0">
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr>
+            <th>路径</th><th>压缩块</th><th>事件数</th><th>通过/拒绝</th>
+            <th>原始大小</th><th>压缩后</th><th>压缩比</th>
+            <th>可下钻区间</th><th>操作</th>
+          </tr></thead>
+          <tbody id="paths-table"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 下钻模态框 -->
+<div class="modal-overlay" id="drill-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 id="drill-title">时间范围下钻</h3>
+      <button class="modal-close" onclick="closeDrill()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group">
+          <label>起始时间</label>
+          <input type="datetime-local" id="drill-start" step="1">
+        </div>
+        <div class="form-group">
+          <label>结束时间</label>
+          <input type="datetime-local" id="drill-end" step="1">
+        </div>
+        <div class="form-group">
+          <label>粒度</label>
+          <select id="drill-gran">
+            <option value="">自动</option>
+            <option value="minute">分钟</option>
+            <option value="5min">5分钟</option>
+            <option value="hour">小时</option>
+          </select>
+        </div>
+        <button class="btn btn-primary" onclick="doDrill()">下钻查询</button>
+      </div>
+      <div class="drill-meta">
+        <div><div class="k">区间事件</div><div class="v" id="dm-total">-</div></div>
+        <div><div class="k">通过 / 拒绝</div><div class="v" style="font-size:16px" id="dm-ar">-</div></div>
+        <div><div class="k">平均速率</div><div class="v" id="dm-rate">-</div></div>
+        <div><div class="k">粒度 / 精度</div><div class="v" style="font-size:16px" id="dm-gran">-</div></div>
+      </div>
+      <div class="chart-container"><canvas id="drillChart"></canvas></div>
+      <div class="drill-side">
+        <div>
+          <h4>Top 客户端 IP</h4>
+          <div id="drill-ips"><div class="empty" style="padding:12px">暂无</div></div>
+        </div>
+        <div>
+          <h4>拒绝原因分布</h4>
+          <div id="drill-reasons"><div class="empty" style="padding:12px">暂无</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let drillChart = null;
+let drillPath = null;
+let drillBounds = null;
+
+function fmtBytes(n) {
+  if (n == null) return '-';
+  if (n >= 1048576) return (n / 1048576).toFixed(2) + ' MB';
+  if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+  return n + ' B';
+}
+function fmtNum(n) { return (n || 0).toLocaleString(); }
+function fmtDateTime(iso) {
+  if (!iso) return '-';
+  return new Date(iso).toLocaleString('zh-CN', {hour12:false});
+}
+function toLocalInput(d) {
+  const pad = x => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function toIsoLocal(value) {
+  // datetime-local -> naive ISO 字符串（与服务端 datetime.fromisoformat 对齐，不带时区后缀）
+  return value.length === 16 ? value + ':00' : value;
+}
+
+async function load() {
+  const res = await fetch('/api/archives');
+  const d = await res.json();
+  document.getElementById('stat-hot').textContent = fmtNum(d.hot_event_count);
+  document.getElementById('stat-retention').textContent = `保留窗口 ${d.retention_hours}h`;
+  document.getElementById('stat-archived').textContent = fmtNum(d.totals.event_count);
+  document.getElementById('stat-blocks').textContent = `${fmtNum(d.totals.blocks)} 个压缩块`;
+  document.getElementById('stat-ratio').textContent = d.totals.compression_ratio ? d.totals.compression_ratio + 'x' : '-';
+  document.getElementById('stat-size').textContent = `${fmtBytes(d.totals.raw_bytes)} → ${fmtBytes(d.totals.compressed_bytes)}`;
+  document.getElementById('stat-cutoff').textContent = fmtDateTime(d.cutoff);
+  document.getElementById('stat-range').textContent = d.totals.range_start
+    ? `归档覆盖 ${fmtDateTime(d.totals.range_start)} ~ ${fmtDateTime(d.totals.range_end)}` : '暂无归档区间';
+
+  if (d.last_run) {
+    const lr = d.last_run;
+    const ratio = lr.compressed_bytes ? (lr.raw_bytes / lr.compressed_bytes).toFixed(1) + 'x' : '-';
+    document.getElementById('last-run').innerHTML =
+      `最近归档: ${fmtDateTime(lr.finished_at)} · 处理 <b>${fmtNum(lr.rows_scanned)}</b> 行 · 删除 ${fmtNum(lr.rows_deleted)} · ` +
+      `压缩 ${ratio} · 用时 ${lr.duration_seconds}s (${fmtNum(lr.rows_per_second)} 行/s)`;
+  }
+
+  const tbody = document.getElementById('paths-table');
+  if (!d.paths.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">暂无归档数据，点击"立即归档一轮"</td></tr>';
+    return;
+  }
+  tbody.innerHTML = d.paths.map(p => {
+    const ratio = p.compression_ratio || 1;
+    const barW = Math.min(100, Math.log10(ratio + 1) / Math.log10(101) * 100);
+    return `<tr>
+      <td><code style="color:var(--cyan)">${p.path}</code></td>
+      <td><span class="badge badge-purple">${p.blocks}</span></td>
+      <td><strong>${fmtNum(p.event_count)}</strong></td>
+      <td><span style="color:var(--green)">${fmtNum(p.allowed_count)}</span> / <span style="color:var(--red)">${fmtNum(p.rejected_count)}</span></td>
+      <td>${fmtBytes(p.raw_bytes)}</td>
+      <td>${fmtBytes(p.compressed_bytes)}</td>
+      <td><strong>${p.compression_ratio ?? '-'}x</strong><span class="ratio-bar"><i style="width:${barW}%"></i></span></td>
+      <td style="font-size:12px">${fmtDateTime(p.drill_range_start)}<br>~ ${fmtDateTime(p.drill_range_end)}</td>
+      <td><button class="btn btn-primary" style="padding:4px 10px" onclick='openDrill(${JSON.stringify(p)})'>下钻</button></td>
+    </tr>`;
+  }).join('');
+}
+
+async function runArchive() {
+  const btn = document.getElementById('btn-run');
+  btn.disabled = true; btn.textContent = '归档中…';
+  try {
+    const res = await fetch('/api/archives/run', {method: 'POST'});
+    if (res.status === 409) { alert('归档任务正在执行中，请稍后刷新'); return; }
+    const data = await res.json();
+    const s = data.stats;
+    alert(`归档完成：处理 ${fmtNum(s.rows_scanned)} 行，删除 ${fmtNum(s.rows_deleted)} 行，用时 ${s.duration_seconds}s`);
+  } catch (e) {
+    alert('归档触发失败: ' + e);
+  } finally {
+    btn.disabled = false; btn.textContent = '立即归档一轮';
+    load();
+  }
+}
+
+function openDrill(p) {
+  drillPath = p.path;
+  drillBounds = [p.drill_range_start, p.drill_range_end];
+  document.getElementById('drill-title').textContent = `下钻 · ${p.path}`;
+  const end = new Date(p.drill_range_end);
+  const start = new Date(p.drill_range_end);
+  start.setHours(start.getHours() - 6);
+  if (start < new Date(p.drill_range_start)) start.setTime(new Date(p.drill_range_start).getTime());
+  document.getElementById('drill-start').value = toLocalInput(start);
+  document.getElementById('drill-end').value = toLocalInput(end);
+  document.getElementById('drill-gran').value = '';
+  document.getElementById('drill-modal').classList.add('active');
+  if (!drillChart) initDrillChart();
+  doDrill();
+}
+function closeDrill() { document.getElementById('drill-modal').classList.remove('active'); }
+
+function initDrillChart() {
+  drillChart = new Chart(document.getElementById('drillChart').getContext('2d'), {
+    type: 'bar',
+    data: { labels: [], datasets: [
+      { label: '通过', data: [], backgroundColor: 'rgba(16,185,129,.7)', stack: 's' },
+      { label: '拒绝', data: [], backgroundColor: 'rgba(239,68,68,.7)', stack: 's' },
+    ]},
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { labels: { color: '#8b8fa3' } } },
+      scales: {
+        x: { stacked: true, grid: { color: 'rgba(42,46,61,.5)' }, ticks: { color: '#8b8fa3', maxRotation: 60, minRotation: 0, font: {size:10} } },
+        y: { stacked: true, grid: { color: 'rgba(42,46,61,.5)' }, ticks: { color: '#8b8fa3' }, beginAtZero: true }
+      }
+    }
+  });
+}
+
+async function doDrill() {
+  const start = new Date(document.getElementById('drill-start').value);
+  const end = new Date(document.getElementById('drill-end').value);
+  if (!(start < end)) { alert('起始时间需早于结束时间'); return; }
+  const gran = document.getElementById('drill-gran').value;
+  const params = new URLSearchParams({
+    path: drillPath,
+    start: toIsoLocal(document.getElementById('drill-start').value),
+    end: toIsoLocal(document.getElementById('drill-end').value),
+  });
+  if (gran) params.set('granularity', gran);
+  const res = await fetch('/api/archives/drill?' + params);
+  if (!res.ok) { alert((await res.json()).detail || '下钻失败'); return; }
+  const d = await res.json();
+
+  document.getElementById('dm-total').textContent = fmtNum(d.total);
+  document.getElementById('dm-ar').innerHTML = `<span style="color:var(--green)">${fmtNum(d.allowed)}</span> / <span style="color:var(--red)">${fmtNum(d.rejected)}</span>`;
+  document.getElementById('dm-rate').textContent = d.avg_rate ?? '-';
+  document.getElementById('dm-gran').textContent =
+    ({minute:'分钟', '5min':'5分钟', hour:'小时'})[d.granularity] + (d.ip_truncated ? ' · IP截断' : '');
+
+  drillChart.data.labels = d.points.map(p => {
+    const dt = new Date(p.bucket);
+    return dt.toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false})
+      + (p.partial ? ' *' : '');
+  });
+  drillChart.data.datasets[0].data = d.points.map(p => p.allowed);
+  drillChart.data.datasets[1].data = d.points.map(p => p.rejected);
+  drillChart.update('none');
+
+  document.getElementById('drill-ips').innerHTML = d.top_ips.length
+    ? d.top_ips.map(x => `<div class="item"><span>${x.ip}</span><span>${fmtNum(x.count)}</span></div>`).join('')
+    : '<div class="empty" style="padding:12px">暂无</div>';
+  const reasons = Object.entries(d.reasons || {});
+  document.getElementById('drill-reasons').innerHTML = reasons.length
+    ? reasons.map(([k,v]) => `<div class="item"><span>${k}</span><span>${fmtNum(v)}</span></div>`).join('')
+    : '<div class="empty" style="padding:12px">区间内无拒绝事件</div>';
+}
+
+document.getElementById('drill-modal').addEventListener('click', e => {
+  if (e.target.id === 'drill-modal') closeDrill();
+});
+load();
+setInterval(load, 15000);
+</script>
+</body>
+</html>

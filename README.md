@@ -73,8 +73,14 @@ docker compose down -v       # 同时清空数据库数据（恢复到全新初�
 ├── circuit_breaker/
 │   ├── state_machine.py       # 熔断器状态机 CLOSED/OPEN/HALF_OPEN
 │   └── manager.py             # 多服务熔断管理
+├── archive/
+│   ├── codec.py               # (path,hour) 压缩块：聚合/zlib 编解码/时间范围下钻
+│   └── archiver.py            # 归档扫描、块 upsert、事务确认后删除原始行
+├── tests/
+│   └── test_archive_codec.py  # 压缩块与并发扫描不变量测试（仅标准库）
 └── frontend/
-    └── index.html             # 控制台页面（Chart.js 实时图表）
+    ├── index.html             # 控制台页面（Chart.js 实时图表）
+    └── archives.html          # 冷热归档分析页（压缩比 + 区间下钻）
 ```
 
 ---
@@ -118,6 +124,34 @@ docker compose down -v       # 同时清空数据库数据（恢复到全新初�
 - 最近限流事件日志
 - 熔断器状态卡片：状态、失败计数、半开试探数，支持改配置与一键重置
 
+### rate_limit_events 冷热分层归档
+
+热表 `rate_limit_events` 只保留近 **72h** 明细（`EVENT_RETENTION_HOURS` 可调），
+后台每 10 分钟（`ARCHIVE_RUN_INTERVAL`）扫描一次，将超窗事件按 **(path, 整点小时桶)**
+聚合为 zlib 压缩块写入新表 `rate_limit_event_archives`，同事务提交确认后再删除原始行。
+
+- **压缩块内容**：分钟级 total/allowed/rejected/平均速率（稀疏存储）、算法/拒绝原因计数、
+  Top 50 客户端 IP（高基数截断并打 `ipc` 标记）。实测 50 万行约 45MB 明细 → 0.6MB 块（~72x）。
+- **不重不漏的并发保证**：归档水位线对齐完整小时且远早于当前时间，persist_events 并发批量
+  插入的新行 `created_at ≈ now` 永远在窗口内、不会被选中；删除只针对本事务快照收集到的
+  `tmp_archived_event_ids` 主键集合；块写入与删除同一事务，失败整轮回滚。
+- **幂等**：`(path, hour_bucket)` 唯一约束 + `INSERT ... ON DUPLICATE KEY UPDATE`，
+  重跑时与存量块做载荷级合并。
+- **性能**：`created_at` 索引 + 主键 keyset 分批扫描（每批 2 万行），删除走临时表 JOIN
+  主键分批执行（每批 5000），单轮 50 万行目标 <30s；`last_run` 记录分阶段耗时与行数。
+- **时间范围下钻**：压缩块按分钟裁剪，可还原任意时间范围的近似分布；
+  跨度 ≤6h / ≤3d / 更长分别自动按分钟 / 5 分钟 / 小时聚合，边界粗粒度桶标记 `partial`。
+- **归档页**：[http://localhost:8888/archives](http://localhost:8888/archives)
+  展示热表行数、整体/各路径压缩比、每个路径的可下钻区间，支持手动触发一轮归档与区间下钻图表。
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `EVENT_RETENTION_HOURS` | 72 | 热数据保留窗口（小时） |
+| `ARCHIVE_RUN_INTERVAL` | 600 | 后台归档扫描间隔（秒） |
+| `ARCHIVE_BATCH_ROWS` | 500000 | 单轮归档最大行数 |
+| `ARCHIVE_SCAN_CHUNK` | 20000 | 扫描批大小 |
+| `ARCHIVE_DELETE_CHUNK` | 5000 | 删除批大小 |
+
 ---
 
 ## 五、HTTP API 一览
@@ -132,7 +166,17 @@ docker compose down -v       # 同时清空数据库数据（恢复到全新初�
 | GET/POST | `/api/circuit-breakers` | 列出 / 新建熔断器 |
 | PUT/DELETE | `/api/circuit-breakers/{name}` | 更新配置 / 删除 |
 | POST | `/api/circuit-breakers/{name}/reset` | 手动重置为正常 |
+| GET | `/archives` | 冷热归档分析页 |
+| GET | `/api/archives` | 归档概览：各路径压缩比、可下钻区间、最近一轮耗时 |
+| POST | `/api/archives/run` | 手动触发一轮归档（与后台任务互斥，执行中返回 409） |
+| GET | `/api/archives/drill?path=&start=&end=&granularity=` | 按时间范围下钻还原近似分布 |
 | ALL | `/proxy/{service}/{path}` | 反向代理（先限流后熔断再转发） |
+
+下钻示例（naive ISO 时间；granularity 可省略以自动选择 minute/5min/hour）：
+
+```bash
+curl "http://localhost:8888/api/archives/drill?path=/api/*&start=2026-09-01T00:00:00&end=2026-09-01T06:00:00&granularity=5min"
+```
 
 新建规则示例：
 

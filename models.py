@@ -1,7 +1,14 @@
 """数据库模型"""
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Boolean, JSON
+from sqlalchemy import Column, Integer, BigInteger, String, Float, DateTime, Text, Boolean, JSON, Index, UniqueConstraint, LargeBinary
 from database import Base
+
+# MySQL 使用 LONGBLOB 承载压缩块；非 MySQL（如本地测试用 SQLite）回退到大二进制类型
+try:  # pragma: no cover - 取决于运行方言
+    from sqlalchemy.dialects.mysql import LONGBLOB
+    _BLOB_TYPE = LONGBLOB()
+except Exception:  # pragma: no cover
+    _BLOB_TYPE = LargeBinary(length=2 ** 24)
 
 
 class RateLimitRule(Base):
@@ -45,6 +52,9 @@ class CircuitBreakerState(Base):
 class RateLimitEvent(Base):
     """限流事件日志"""
     __tablename__ = "rate_limit_events"
+    __table_args__ = (
+        Index("idx_events_created", "created_at"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     path = Column(String(255), nullable=False)
@@ -54,7 +64,28 @@ class RateLimitEvent(Base):
     current_rate = Column(Float, comment="当前速率")
     limit_rate = Column(Float, comment="限制速率")
     reason = Column(String(200), comment="拒绝原因")
-    created_at = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=datetime.now, comment="事件发生时间")
+
+
+class RateLimitEventArchive(Base):
+    """限流事件冷数据归档表：按 (path, hour_bucket) 聚合的压缩块"""
+    __tablename__ = "rate_limit_event_archives"
+    __table_args__ = (
+        # 唯一约束本身即 (path, hour_bucket) 复合索引，兼顾点查与范围扫描
+        UniqueConstraint("path", "hour_bucket", name="uq_archive_path_hour"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    path = Column(String(255), nullable=False)
+    hour_bucket = Column(DateTime, nullable=False, comment="整点小时桶")
+    event_count = Column(Integer, nullable=False, default=0, comment="块内事件数")
+    allowed_count = Column(Integer, nullable=False, default=0)
+    rejected_count = Column(Integer, nullable=False, default=0)
+    raw_size_bytes = Column(BigInteger, nullable=False, default=0, comment="原始行估算字节数")
+    block_size = Column(Integer, nullable=False, default=0, comment="压缩块字节数")
+    block_data = Column(_BLOB_TYPE, nullable=False, comment="zlib 压缩的聚合载荷")
+    created_at = Column(DateTime, default=datetime.now, comment="首次归档时间")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment="最近重写时间")
 
 
 class TrafficStat(Base):

@@ -20,6 +20,13 @@ DEFAULT_RULES = {
     "window_size": 60,    # 滑动窗口/固定窗口大小(秒)
 }
 
+# 事件冷热分层归档配置
+EVENT_RETENTION_HOURS = int(os.getenv("EVENT_RETENTION_HOURS", "72"))  # 热数据保留窗口(小时)，早于此时间的事件归档
+ARCHIVE_RUN_INTERVAL = int(os.getenv("ARCHIVE_RUN_INTERVAL", "600"))   # 后台归档扫描间隔(秒)
+ARCHIVE_BATCH_ROWS = int(os.getenv("ARCHIVE_BATCH_ROWS", "500000"))    # 单轮归档最大处理行数
+ARCHIVE_SCAN_CHUNK = int(os.getenv("ARCHIVE_SCAN_CHUNK", "20000"))     # 归档扫描每批读取行数
+ARCHIVE_DELETE_CHUNK = int(os.getenv("ARCHIVE_DELETE_CHUNK", "5000"))  # 归档确认后每批删除行数
+
 # 熔断器默认配置
 DEFAULT_CIRCUIT_BREAKER = {
     "failure_threshold": 5,       # 失败次数阈值

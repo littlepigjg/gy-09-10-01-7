@@ -20,11 +20,13 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config import APP_HOST, APP_PORT
+from config import APP_HOST, APP_PORT, EVENT_RETENTION_HOURS, ARCHIVE_RUN_INTERVAL
 from database import init_db, async_session, engine
 from models import RateLimitRule, CircuitBreakerState, RateLimitEvent, TrafficStat
 from rate_limiter import RateLimitManager
 from circuit_breaker import CircuitBreakerManager
+from archive import get_archiver
+from archive.archiver import ArchiveAlreadyRunning
 
 # 日志配置
 logging.basicConfig(
@@ -36,6 +38,7 @@ logger = logging.getLogger(__name__)
 # 全局管理器
 rate_limit_manager = RateLimitManager()
 circuit_breaker_manager = CircuitBreakerManager()
+event_archiver = get_archiver()
 http_client: httpx.AsyncClient = None
 
 # 事件缓冲队列（批量写入数据库，线程安全）
@@ -71,6 +74,18 @@ async def persist_events():
                 await session.commit()
         except Exception as e:
             logger.error(f"持久化事件失败: {e}")
+
+
+async def archive_events_loop():
+    """定时冷热分层归档：超保留窗口的事件聚合为压缩块后删除原始行"""
+    while True:
+        try:
+            await event_archiver.run_once()
+        except ArchiveAlreadyRunning:
+            pass
+        except Exception as e:
+            logger.error(f"归档事件失败: {e}")
+        await asyncio.sleep(ARCHIVE_RUN_INTERVAL)
 
 
 async def persist_traffic_stats():
@@ -162,6 +177,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(persist_events()),
         asyncio.create_task(persist_traffic_stats()),
         asyncio.create_task(persist_circuit_breaker_states()),
+        asyncio.create_task(archive_events_loop()),
     ]
 
     logger.info(f"限流熔断网关启动: http://{APP_HOST}:{APP_PORT}")
@@ -511,12 +527,69 @@ async def delete_circuit_breaker(service_name: str):
     return {"message": f"熔断器 {service_name} 已删除"}
 
 
+# ==================== 冷热分层归档 API ====================
+
+@app.get("/api/archives")
+async def archive_summary():
+    """归档概览：总体压缩指标、各路径压缩比与可下钻区间、最近一轮归档情况"""
+    async with async_session() as session:
+        totals = await event_archiver.archive_totals(session)
+        paths = await event_archiver.summary_by_path(session)
+        hot_count = await event_archiver.hot_event_count(session)
+    return {
+        "retention_hours": EVENT_RETENTION_HOURS,
+        "cutoff": event_archiver.cutoff_for().isoformat(),
+        "totals": totals,
+        "hot_event_count": hot_count,
+        "paths": paths,
+        "last_run": event_archiver.last_run,
+    }
+
+
+@app.post("/api/archives/run")
+async def trigger_archive():
+    """手动触发一轮归档（与后台定时任务互斥）"""
+    try:
+        stats = await event_archiver.run_once()
+    except ArchiveAlreadyRunning:
+        raise HTTPException(409, "归档任务正在执行中，请稍后再试")
+    return {"message": "归档完成", "stats": stats}
+
+
+@app.get("/api/archives/drill")
+async def archive_drill(path: str, start: str = None, end: str = None, granularity: str = None):
+    """按时间范围下钻压缩块，还原近似分布"""
+    try:
+        end_dt = datetime.fromisoformat(end) if end else datetime.now()
+        start_dt = datetime.fromisoformat(start) if start else end_dt - timedelta(hours=1)
+    except ValueError:
+        raise HTTPException(400, "时间格式需为 ISO 8601，如 2026-09-01T00:00:00")
+    if start_dt >= end_dt:
+        raise HTTPException(400, "start 必须早于 end")
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(RateLimitEventArchive).where(RateLimitEventArchive.path == path).limit(1)
+        )
+        if result.scalar_one_or_none() is None:
+            raise HTTPException(404, f"路径 {path} 无归档数据")
+        data = await event_archiver.drill(session, path, start_dt, end_dt, granularity)
+    return data
+
+
 # ==================== 前端页面 ====================
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
     """Dashboard首页"""
     with open("frontend/index.html", "r", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
+
+
+@app.get("/archives", response_class=HTMLResponse)
+async def archives_page():
+    """冷热分层归档分析页"""
+    with open("frontend/archives.html", "r", encoding="utf-8") as f:
         return HTMLResponse(content=f.read())
 
 
